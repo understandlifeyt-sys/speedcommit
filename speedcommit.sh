@@ -1,10 +1,10 @@
 #!/bin/bash
-# speedcommit.sh - 50 parallel bots, each commits every 50ms and pushes every 15s
+# speedcommit.sh - N bots, each commits every 50ms and pushes every 15s
 
 REPO_NAME="${REPO_NAME:-speed-commit}"
 GITHUB_USER="${GITHUB_USER}"
 GITHUB_TOKEN="${GITHUB_TOKEN}"
-NUM_BOTS="${NUM_BOTS:-50}"
+NUM_BOTS="${NUM_BOTS:-10}"
 
 if [ -z "$GITHUB_USER" ] || [ -z "$GITHUB_TOKEN" ]; then
   echo "ERROR: GITHUB_USER and GITHUB_TOKEN must be set as environment variables."
@@ -13,13 +13,21 @@ fi
 
 CLONE_URL="https://$GITHUB_TOKEN@github.com/$GITHUB_USER/$REPO_NAME.git"
 
-# Repo must already exist on GitHub - we skip creation and go straight to clone
-echo "Using existing repo '$REPO_NAME' on GitHub..."
+echo "=== COMMITBLAST starting ==="
+echo "User: $GITHUB_USER | Repo: $REPO_NAME | Bots: $NUM_BOTS"
+echo ""
 
-# --- Bootstrap: clone once and make initial commit if repo is empty -----------
+# --- Bootstrap: ensure repo has at least one commit --------------------------
 BOOTSTRAP_DIR="/tmp/cb_bootstrap"
 rm -rf "$BOOTSTRAP_DIR"
-git clone "$CLONE_URL" "$BOOTSTRAP_DIR"
+echo "[BOOT] Cloning repo..."
+git clone "$CLONE_URL" "$BOOTSTRAP_DIR" 2>&1
+if [ ! -d "$BOOTSTRAP_DIR/.git" ]; then
+  echo "[BOOT] Clone failed! Check GITHUB_TOKEN and REPO_NAME."
+  exit 1
+fi
+echo "[BOOT] Clone OK"
+
 cd "$BOOTSTRAP_DIR"
 git config user.email "$GITHUB_USER@users.noreply.github.com"
 git config user.name  "CommitBlast"
@@ -29,15 +37,11 @@ if ! git log --oneline > /dev/null 2>&1; then
   git add README.md
   git commit -m "Initial commit"
   git push origin HEAD
-  echo "Initial commit pushed."
+  echo "[BOOT] Initial commit pushed."
 fi
 cd /
 
 # --- Worker function ----------------------------------------------------------
-# Each bot gets its own clone dir and its own file (bot_N.txt)
-# It commits every 50ms and pushes every 15 seconds.
-# On push rejection it pull-rebases and retries up to 10 times.
-
 worker() {
   local BOT_ID="$1"
   local LOCAL="/tmp/cb_bot${BOT_ID}"
@@ -46,13 +50,12 @@ worker() {
   local COMMITS=0
   local PUSHES=0
 
-  rm -rf "$LOCAL"
-  git clone "$CLONE_URL" "$LOCAL" 2>&1 | tail -1
+  if [ ! -d "$LOCAL/.git" ]; then
+    echo "[BOT $BOT_ID] No clone dir - skipping"
+    return
+  fi
+
   cd "$LOCAL"
-  git config user.email "bot${BOT_ID}@commitblast.local"
-  git config user.name  "CommitBlast-Bot${BOT_ID}"
-  git config pull.rebase true
-  git config rerere.enabled false
 
   # Resume if file already exists
   if [ -f "$MYFILE" ]; then
@@ -73,9 +76,7 @@ worker() {
         echo "[BOT $BOT_ID] PUSHED #$PUSHES (commits: $COMMITS)"
         return 0
       fi
-      # Rejected because remote is ahead → rebase and retry
       if echo "$PUSH_OUT" | grep -qiE "rejected|non-fast-forward|fetch first"; then
-        echo "[BOT $BOT_ID] Push rejected (attempt $((ATTEMPTS+1))) - rebasing..."
         git pull --rebase --autostash origin HEAD 2>&1 || git rebase --abort 2>/dev/null
       else
         echo "[BOT $BOT_ID] Push error (attempt $((ATTEMPTS+1))): $PUSH_OUT"
@@ -105,19 +106,33 @@ worker() {
   done
 }
 
+# --- Clone all bots sequentially before launching ----------------------------
+echo "Cloning $NUM_BOTS bot repos (one at a time)..."
+for i in $(seq 1 $NUM_BOTS); do
+  LOCAL="/tmp/cb_bot${i}"
+  rm -rf "$LOCAL"
+  echo "[BOT $i] Cloning..."
+  git clone "$CLONE_URL" "$LOCAL" 2>&1 | tail -1
+  if [ ! -d "$LOCAL/.git" ]; then
+    echo "[BOT $i] Clone FAILED"
+    continue
+  fi
+  cd "$LOCAL"
+  git config user.email "bot${i}@commitblast.local"
+  git config user.name  "CommitBlast-Bot${i}"
+  git config pull.rebase true
+  git config rerere.enabled false
+  cd /
+  echo "[BOT $i] Ready"
+done
+
 # --- Cleanup on exit ----------------------------------------------------------
 cleanup() {
-  echo ""
-  echo "Shutting down - sending final pushes..."
-  # Kill all background workers
+  echo "Shutting down..."
   kill $(jobs -p) 2>/dev/null
-  # Final push from each bot dir
   for i in $(seq 1 $NUM_BOTS); do
     LOCAL="/tmp/cb_bot${i}"
-    if [ -d "$LOCAL" ]; then
-      cd "$LOCAL"
-      git push origin HEAD 2>/dev/null &
-    fi
+    [ -d "$LOCAL" ] && cd "$LOCAL" && git push origin HEAD 2>/dev/null &
   done
   wait
   echo "All bots stopped."
@@ -127,13 +142,12 @@ trap cleanup SIGINT SIGTERM
 
 # --- Launch all bots ----------------------------------------------------------
 echo ""
-echo "Launching $NUM_BOTS bots... (commit every 50ms, push every 15s each)"
+echo "Launching bots!"
 echo ""
 
 for i in $(seq 1 $NUM_BOTS); do
-  worker "$i" &
-  sleep 0.1   # stagger starts slightly to avoid clone stampede
+  [ -d "/tmp/cb_bot${i}/.git" ] && worker "$i" &
 done
 
-echo "All $NUM_BOTS bots running! Press Ctrl+C to stop."
+echo "All $NUM_BOTS bots running!"
 wait
