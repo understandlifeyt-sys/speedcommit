@@ -13,22 +13,8 @@ fi
 
 CLONE_URL="https://$GITHUB_TOKEN@github.com/$GITHUB_USER/$REPO_NAME.git"
 
-# --- Create repo if it doesn't exist -----------------------------------------
-echo "Ensuring GitHub repo '$REPO_NAME' exists..."
-RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
-  -X POST "https://api.github.com/user/repos" \
-  -H "Authorization: token $GITHUB_TOKEN" \
-  -H "Accept: application/vnd.github+json" \
-  -d "{\"name\":\"$REPO_NAME\",\"private\":false,\"auto_init\":false}")
-
-if [ "$RESPONSE" == "201" ]; then
-  echo "Repo created."
-elif [ "$RESPONSE" == "422" ]; then
-  echo "Repo already exists -- continuing."
-else
-  echo "Failed to create repo (HTTP $RESPONSE)"
-  exit 1
-fi
+# Repo must already exist on GitHub - we skip creation and go straight to clone
+echo "Using existing repo '$REPO_NAME' on GitHub..."
 
 # --- Bootstrap: clone once and make initial commit if repo is empty -----------
 BOOTSTRAP_DIR="/tmp/cb_bootstrap"
